@@ -1,0 +1,5 @@
+{"mutants_killed":2,"mutants_lived":1,"mutants_not_viable":0,"mutants_not_covered":0,"elapsed_time":1.0,
+ "files":[{"file_name":"a.go","mutations":[
+  {"type":"X","status":"KILLED","line":1,"column":1},
+  {"type":"X","status":"KILLED","line":2,"column":1},
+  {"type":"X","status":"LIVED","line":3,"column":1}]}]}

@@ -1,0 +1,1 @@
+{"scope": ["src/**"], "result": "fail", "failed_gates": ["scope"], "detail_contains": {"scope": "docs/notes.md"}}

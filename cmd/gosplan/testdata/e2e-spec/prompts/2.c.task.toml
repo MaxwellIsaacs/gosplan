@@ -1,0 +1,3 @@
+scope = ["fake-2.c.txt"]
+allow_new_protected = true
+deps = []

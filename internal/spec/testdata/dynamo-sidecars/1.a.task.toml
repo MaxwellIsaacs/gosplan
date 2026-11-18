@@ -1,0 +1,4 @@
+# Task sidecar (spec.md section 6). One-line arrays of double-quoted strings
+scope = ["go.mod", "internal/core/**", "internal/state/*_test.go"]
+allow_new_protected = true
+deps = []

@@ -1,0 +1,24 @@
+# gosplan's own project config: the gates `gosplan verify` runs when gosplan
+# is used to build gosplan. It is read from the base commit of a run, and no
+# task may change it (it is a locked path).
+#
+# Every command is a double-quoted TOML string with no double quotes and no
+# backslashes inside. Commands run in a clean export with no .git and a
+# fresh HOME, so caches start cold: the timeouts allow for that.
+
+[verify]
+# gofmt, vet and the whole suite, conformance included.
+test = "nix shell nixpkgs#go nixpkgs#gcc nixpkgs#git -c bash -c 'gofmt -l . ; go vet ./... && go test -race -count=1 ./...'"
+# Strict gofmt plus the static CGO_ENABLED=0 build of every command.
+lint = "nix shell nixpkgs#go nixpkgs#gcc nixpkgs#git -c bash -c '! gofmt -l . | tee /dev/stderr | grep -q . && CGO_ENABLED=0 go build -o /dev/null ./cmd/...'"
+
+[verify.timeouts]
+test_seconds = 1800
+lint_seconds = 900
+
+[verify.locked]
+# Added to gosplan's default locks (nightrunner.toml, .gitattributes,
+# .mcp.json, .claude/**, CLAUDE.md). The verifier, the git layer, the event
+# log, the golden fixtures, the conformance suite and the trust-critical
+# parts of the reconciler change only by human-reviewed commits.
+paths = ["internal/verify/**", "internal/gitx/**", "internal/events/**", "cmd/gosplan/eventlog.go", "testdata/golden/**", "conformance/**", "go.work", "internal/core/**", "internal/state/schema.sql", "go.mod", "go.sum", "internal/reconcile/memory.go", "internal/reconcile/resume.go", "internal/verifyexec/**", "internal/attest/**"]

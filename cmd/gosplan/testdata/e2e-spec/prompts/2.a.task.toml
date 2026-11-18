@@ -1,0 +1,2 @@
+scope = ["fake-2.a.txt"]
+allow_new_protected = true

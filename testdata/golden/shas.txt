@@ -1,0 +1,7 @@
+# Expected commit SHAs of the golden fixtures: name base(main) head(task).
+# build.sh prints lines in this format; the tests rebuild the fixtures and
+# fail if any SHA differs. Update by hand only after reviewing the change.
+tampered-protected-test 6880731eba6cfd417179cc37190a8390565512f9 3bcc9112490b5774f66866605499e966161b94ad
+uncommitted-only-pass e9b7bd67f30641338aaa695af7e82276a33a8e7c 6cf7c6041298c3c1a300832e9eeb12d63e1fb17e
+out-of-scope e9b7bd67f30641338aaa695af7e82276a33a8e7c 309dde9182c9263c2cd55d5926357e219e56ffb9
+honest-pass e9b7bd67f30641338aaa695af7e82276a33a8e7c be2a35d685603068d4c418d273271e508bb75394

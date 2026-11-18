@@ -1,0 +1,2 @@
+# 2.c has deps = [] (runs at once); 3.a lists its deps explicitly.
+1.a -> (2.a || 2.b || 2.c) -> 3.a

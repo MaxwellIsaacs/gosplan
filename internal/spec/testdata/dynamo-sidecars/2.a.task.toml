@@ -1,0 +1,3 @@
+scope = ["internal/spec/**", "internal/state/tasks.go", "internal/state/tasks_test.go"]
+allow_new_protected = true
+deps = ["1.a"]

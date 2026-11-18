@@ -1,0 +1,18 @@
+{"go_module":"m","test_efficacy":77.7,"mutations_coverage":90.0,"mutants_total":13,"mutants_killed":7,"mutants_lived":2,"mutants_not_viable":0,"mutants_not_covered":1,"elapsed_time":12.5,
+ "files":[
+  {"file_name":"a.go","mutations":[
+   {"type":"CONDITIONALS_NEGATION","status":"KILLED","line":10,"column":8},
+   {"type":"CONDITIONALS_NEGATION","status":"KILLED","line":11,"column":8},
+   {"type":"ARITHMETIC_BASE","status":"KILLED","line":12,"column":3},
+   {"type":"ARITHMETIC_BASE","status":"LIVED","line":14,"column":5},
+   {"type":"INCREMENT_DECREMENT","status":"TIMED OUT","line":15,"column":2},
+   {"type":"INCREMENT_DECREMENT","status":"TIMED OUT","line":16,"column":2},
+   {"type":"INCREMENT_DECREMENT","status":"NOT COVERED","line":17,"column":2}]},
+  {"file_name":"b/b.go","mutations":[
+   {"type":"CONDITIONALS_BOUNDARY","status":"KILLED","line":3,"column":9},
+   {"type":"CONDITIONALS_BOUNDARY","status":"KILLED","line":4,"column":9},
+   {"type":"CONDITIONALS_BOUNDARY","status":"KILLED","line":5,"column":9},
+   {"type":"CONDITIONALS_BOUNDARY","status":"KILLED","line":6,"column":9},
+   {"type":"INVERT_NEGATIVES","status":"LIVED","line":20,"column":4},
+   {"type":"INVERT_NEGATIVES","status":"TIMED OUT","line":21,"column":4}]}
+ ]}
