@@ -20,7 +20,7 @@ import (
 	"github.com/MaxwellIsaacs/gosplan/internal/verify"
 )
 
-const version = "0.1.0-m1"
+const version = "0.2.0"
 
 const (
 	exitPass  = 0

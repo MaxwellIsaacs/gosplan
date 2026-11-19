@@ -77,6 +77,16 @@ Symlink them into `~/.claude/skills/`. Machine-specific notes (which host
 runs gosplan, resource policy) go in `~/.config/gosplan/operator.md`, which
 gosplan-drive reads first.
 
+## Install
+
+```
+go install github.com/MaxwellIsaacs/gosplan/cmd/gosplan@latest
+gosplan version
+```
+
+Needs Go 1.26 or newer, `git`, and the `claude` CLI on PATH for real runs.
+No cgo: the SQLite store is pure Go.
+
 ## Build and test
 
 ```
