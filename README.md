@@ -52,7 +52,7 @@ attempts and the run halted.
 
 | command | what it does |
 |---|---|
-| `gosplan run` | schedule a spec's tasks by dependency, supervise the workers, verify each task |
+| `gosplan run` | preflight the environment, schedule a spec's tasks by dependency, supervise the workers, verify each task; `--continue` finishes a halted run |
 | `gosplan status` | read-only view of a run: tasks, attempts, verdicts, observed windows |
 | `gosplan verify` | verify a task's `base..head` in a clean export. Exit 0 pass, 1 fail, 2 could not verify |
 | `gosplan replay` | fold an `events.jsonl` into task statuses; `--check` compares them with a `state.json` |

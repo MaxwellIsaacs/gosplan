@@ -39,11 +39,27 @@ All of these, every time:
 4. **The verify commands pass at the base**, run by hand the way the
    verifier will (clean checkout, no `.git`, fresh `HOME`). A gate that
    fails at the base fails every task.
-5. **Headroom.** Each task gets a full worktree plus cold build caches, and
+5. **The launch environment is the one the run will see.** `gosplan run`
+   preflights this itself (claude flags, every gate command on PATH, `--min-free-disk`
+   free, warning under twice it) and exits 2 with a list; `--dry-run --project`
+   shows the same checks without starting. Pin PATH and the binaries in
+   `nightrunner.toml` `[env]` so a tmux PATH cannot differ. By hand: Check from the
+   same shell (or tmux session) you launch from, because a tmux or cron PATH
+   differs from your login shell's:
+   - `command -v claude && claude --version`: the `claude` gosplan will
+     exec must accept `--permission-mode bypassPermissions` and
+     `--output-format stream-json`. An old one (a real run found 0.2.109
+     on PATH) dies on the flags in every attempt.
+   - The first word of every `[verify]` command resolves: `command -v nix`,
+     `command -v go`, and so on. If one is missing anyway, the first verify
+     that hits exit 127 halts the run `environment` with the attempt
+     refunded (a real run once lost about 3 hours to this before).
+6. **Headroom.** Each task gets a full worktree plus cold build caches, and
    `budget.jsonl`/`events.jsonl` keep growing. Check free disk and RAM for
-   `--max-parallel` workers plus their verifies. Running out of disk mid-run
-   produces torn logs and a halt.
-6. **Usage window.** `gosplan budget --project <proj>` (or `gosplan status`)
+   `--max-parallel` workers plus their verifies. A run halts `disk_low`
+   under `--min-free-disk` (3G) before its logs tear; set it to your
+   policy (a 21-task web app run needed 12+ GB).
+7. **Usage window.** `gosplan budget --project <proj>` (or `gosplan status`)
    shows the observed five-hour and weekly windows. Launching into a nearly
    full window means workers stalling on rate limits.
 
@@ -84,7 +100,9 @@ Task states: `pending` → `running` → `verifying` → `passed` | `failed` |
 
 ## When a task fails
 
-Read the evidence, not the worker's account of it:
+Start with `gosplan status`: its `why:` section gives the halt reason and,
+for each failed task, its reason and the last line of the failing gate's
+log. Then read the evidence, not the worker's account of it:
 
 1. **The verdict:** `<state>/runs/<run>/verify/<task>.<n>.<seq>/verdict.json`.
    `jq -c '.failed_gates, (.gates[] | {name, status})' verdict.json`. Gates
@@ -122,14 +140,12 @@ The halt reason in the log or report names what stopped the run
   changed since import", exit 2). It re-verifies every passed task by SHA
   before continuing. A run that already ended `complete` or `halted` is only
   reported, not continued.
-- **Re-run after fixing the spec.** If you edit a prompt or sidecar, the run
-  cannot be resumed. Start a new run that keeps what passed:
-  1. Point a ref at the old run's integration tip:
-     `git -C <proj> branch base/<op>-r2 gosplan/<old-run>/integration`.
-  2. Copy the op to `<op>_R2`, drop the passed tasks from `sequence.txt`
-     and from every `deps`, renumber the tiers if the first is now empty, fix
-     the failing prompts.
-  3. `--dry-run`, then launch with `--base base/<op>-r2`.
+- **Continue a halted run** (a task failed, an `environment` or
+  `disk_low` halt): fix the cause (the failing prompt, PATH, disk), then
+  `gosplan run --spec <op> --project <proj> --continue <ID>`. That is a new
+  run of every task that did not pass, based on the old run's passed work;
+  the spec may have changed. `--on-run <ID> --only 4.a,4.b` picks the tasks
+  yourself. `gosplan status` on a halted run prints the exact command.
 
 ## Ship
 

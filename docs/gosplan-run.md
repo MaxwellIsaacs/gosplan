@@ -64,6 +64,8 @@ and `gosplan run` prints `halted (<reason>: <detail>)`; the same text is the
 | `verifier_error` | `--max-verify-errors` (3) consecutive could-not-verify results across the run. On in every budget mode, with or without a gate (see Budget). |
 | `deadline` | the budget gate's stop halt at `--deadline`: live workers are killed, their attempts refunded, and the pending tasks stay `pending` (parked). The detail is `parked <ids>`. |
 | `cap:usd_estimate`, `cap:window:<pool>` | the budget gate's drain halt at a per-run cap: no new attempt starts, running ones finish and are verified, then the run ends with `parked <ids>`. |
+| `environment` | a verify gate's command exited 126/127 (not executable / not found, e.g. `nix` not on PATH), or a worker exited 126/127 or rejected gosplan's flags (an old `claude`). The attempt is refunded and the task is back to `pending`: fix the environment, then `--continue`. |
+| `disk_low` | free space on the state dir's or the project's filesystem fell under `--min-free-disk` (3G). The run stops while `gosplan.db` and the logs can still be written; `--continue` finishes it once there is room. |
 | `no_progress` | a task was ready but never dispatched, running with no worker (or with an exit that could not be recorded), or verifying with no verify (or with a verdict that could not be recorded), for two minutes. The detail names the tasks. |
 
 `gosplan run` never writes `main`, `master` or the project's checked-out branch.
@@ -79,7 +81,11 @@ integration branch was written; resume cross-checks it against `gosplan.db`.
 gosplan run --spec DIR --project DIR [flags]
   --state-dir DIR        default $XDG_STATE_HOME/gosplan/<project>-<sha256(path)[:12]>
   --base REF             base of a new run (default HEAD), resolved once
-  --run ID               resume this run
+  --run ID               resume this run (a crashed or aborted one; an ended run is only reported)
+  --continue ID          new run of every task that did not pass in ended run ID, on its passed work
+  --on-run ID --only IDS new run of the listed tasks (comma-separated) on ended run ID's passed work
+  --skip-preflight       skip the launch checks (see Preflight)
+  --min-free-disk SIZE   halt disk_low below this free space; preflight refuses under it, warns under twice it (3G)
   --max-parallel N       tasks running or verifying at once (3)
   --max-attempts N       attempts per task (3)
   --stall-timeout D      kill a worker silent on stdout this long (5m)
@@ -109,6 +115,68 @@ gosplan run --spec DIR --project DIR [flags]
 waves in which tasks become ready if every task passes. It opens no
 database and creates no worktree.
 
+## Preflight
+
+Before a new run imports anything (and before a resume takes its lock),
+`gosplan run` checks in a few seconds what would otherwise show up hours
+later as failed attempts, and exits 2 listing every problem:
+
+- **claude.** The `--claude` binary is on PATH. If its `--version` says it
+  is Claude Code, its `--help` must list the flags gosplan passes
+  (`--output-format`, `--verbose`, `--permission-mode`, `--session-id`,
+  `--model`, `-p`); an old claude fails here instead of in every attempt.
+  Anything else (a wrapper, a test fake) is noted and not flag-checked.
+  It runs in a scratch dir with only `PATH` and `HOME`.
+- **Gate commands.** For every `[verify]` command in `nightrunner.toml` at
+  the base, the program each top-level simple command runs is on PATH.
+  Words inside quotes are not split out: in
+  `nix shell nixpkgs#go -c bash -c 'go test ./...'` only `nix` and `bash`
+  are checked, since `go` exists only inside the nix shell. Paths relative
+  to the export (`./scripts/check.sh`) are skipped.
+- **Disk.** The state dir's and the project's filesystems each have at
+  least `--min-free-disk` free (a warning under twice it).
+
+`--dry-run --project DIR` prints the same checks for a new run at `--base`
+(its exit status still reports only whether the spec is valid).
+`--skip-preflight` turns them off.
+
+## `[env]`: pin the environment in the config
+
+```toml
+[env]
+path = "/run/current-system/sw/bin:$PATH"  # PATH for workers, gosplan verify and every gate
+claude = "/home/me/.local/bin/claude"      # worker binary, unless --claude is given
+gosplan = "/home/me/.local/bin/gosplan"    # verify binary, unless --gosplan-bin is given
+```
+
+`[env]` is read from `nightrunner.toml` at the run base, like the rest of
+the config, so a tmux, cron or sandbox PATH cannot change what a run sees.
+In `path`, only `$PATH` and `$HOME` expand (to the launching environment's
+values). Explicit flags win over `claude` and `gosplan`.
+
+## Continuing a halted run
+
+An ended run (`complete` or `halted`) is never reopened; its record stays
+as it ended. To finish its work, start a continuation run:
+
+```
+gosplan run --spec DIR --project DIR --continue <halted run>
+gosplan run --spec DIR --project DIR --on-run <ended run> --only 4.a,4.b
+```
+
+A continuation run is a new run whose base is the ended run's integration
+tip (or, if it halted before integrating, its base with its passed heads
+merged in), and whose tasks are `--only`'s, or with `--continue` every task
+that did not pass there. A dependency outside the subset must have passed
+in the ended run (its work is in the base) and is dropped from the task's
+deps; any other dependency is an error naming the task to add. The spec
+may have changed since the ended run (fix the failing prompts first).
+The subset is recorded in `<state>/runs/<run>/subset.json`, so
+`--run <continuation run>` resumes it like any other run. The ended run's
+passed heads are taken as that run recorded and verified them; the
+continuation verifies only its own tasks. `gosplan status` on a halted run
+prints the `--continue` command.
+
 ## State directory
 
 ```
@@ -125,6 +193,7 @@ database and creates no worktree.
 <state>/runs/<run>/verify-logs/<task>/<n>/<seq>/          (<n>-resume/<seq>/ for a resume re-verify)
 <state>/runs/<run>/attest/<task>.<n>.dsse.json
 <state>/runs/<run>/mutation/<task>.<n>.json
+<state>/runs/<run>/subset.json                   continuation runs only: {on_run, only}
 <state>/runs/<run>/budget.jsonl                  budget events (budget_*; never in events.jsonl)
 <state>/budget.toml                              budget config (optional; read once per run)
 ```
@@ -377,7 +446,7 @@ Inspect it with `gosplan budget`, `gosplan budget explain TASK` and
 ## Inspecting a run
 
 ```
-gosplan status --state-dir <state> [--run ID] [--json]     # tasks, attempts, verdicts, mutation, windows
+gosplan status --state-dir <state> [--run ID] [--json]     # tasks, attempts, verdicts, windows; text mode ends with "why:" (halt reason, each failed task's reason and last gate log line)
 cat <state>/runs/<run>/report.json
 gosplan replay --log <state>/runs/<run>/events.jsonl --state <state>/runs/<run>/state.json --check   # + budget.jsonl when present
 gosplan budget --state-dir <state> [--json]                  # pools, headroom at the horizon, reservations, breakers

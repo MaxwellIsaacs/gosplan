@@ -86,6 +86,18 @@ type Options struct {
 	MaxVerifyErrors int
 	StallQuietMax   time.Duration
 
+	// Environment and preflight. ClaudeExplicit / GosplanBinExplicit say the
+	// flag was given, so [env] in the config does not override it.
+	ClaudeExplicit, GosplanBinExplicit bool
+	SkipPreflight                      bool  // skip the launch checks
+	MinFreeDisk                        int64 // bytes: halt disk_low below it, refuse to start below 2x; default DefaultMinFreeDisk
+
+	// Continuation runs. OnRun: build on that ended run's passed work (its
+	// integration tip), running only the tasks in Only. Continue: OnRun with
+	// Only = every task that did not pass in it.
+	OnRun, Continue string
+	Only            []string
+
 	budget *budgetSetup // resolved once by Run
 	spec   *spec.Spec   // the spec in memory (sidecar budget keys)
 }
@@ -147,6 +159,9 @@ func (o Options) withDefaults() (Options, error) {
 	str(&o.Mutation, d.Mutation)
 	str(&o.Gremlins, d.Gremlins)
 	str(&o.GosplanVersion, d.GosplanVersion)
+	if o.MinFreeDisk <= 0 {
+		o.MinFreeDisk = DefaultMinFreeDisk
+	}
 	if o.Mutation != MutationAdvisory && o.Mutation != MutationOff {
 		return o, fmt.Errorf("--mutation must be %q or %q, got %q", MutationAdvisory, MutationOff, o.Mutation)
 	}
@@ -203,7 +218,7 @@ func RetryDelay(base time.Duration) func(n int) time.Duration {
 	}
 }
 
-// workerArgv is the claude worker argv (argv[0] is the binary).
+// workerArgv is the claude argv of a worker (argv[0] is the binary).
 func workerArgv(claude, prompt, sessionID, model string, maxTurns int) []string {
 	return []string{claude, "-p", prompt,
 		"--output-format", "stream-json", "--verbose",
@@ -346,17 +361,20 @@ func Run(ctx context.Context, opt Options) (Outcome, error) {
 	for _, w := range sp.Warnings {
 		fmt.Fprintf(opt.Stderr, "gosplan run: warning: %s\n", w)
 	}
-	// The budget config is read once, here, before anything is written:
-	// an invalid one stops the run before any task runs.
-	if opt.budget, err = resolveBudget(opt, sp); err != nil {
-		return Outcome{}, err
-	}
-	opt.spec = sp
-	var base string
-	if opt.RunID == "" {
-		if base, err = (wt.Git{}).ResolveCommit(ctx, opt.Project, opt.BaseRef); err != nil {
-			return Outcome{}, err
+	if opt.Continue != "" {
+		if opt.OnRun != "" && opt.OnRun != opt.Continue {
+			return Outcome{}, fmt.Errorf("--continue %s and --on-run %s name different runs", opt.Continue, opt.OnRun)
 		}
+		if len(opt.Only) > 0 {
+			return Outcome{}, errors.New("--continue runs every task that did not pass; to pick tasks, use --on-run with --only")
+		}
+		opt.OnRun = opt.Continue
+	}
+	if opt.OnRun != "" && opt.RunID != "" {
+		return Outcome{}, errors.New("--continue and --on-run start a new run; resume a continuation run with --run alone")
+	}
+	if len(opt.Only) > 0 && opt.OnRun == "" {
+		return Outcome{}, errors.New("--only needs --on-run RUN (the run whose passed work it builds on)")
 	}
 
 	store, err := state.Open(filepath.Join(opt.StateDir, "gosplan.db"))
@@ -365,14 +383,78 @@ func Run(ctx context.Context, opt Options) (Outcome, error) {
 	}
 	defer store.Close()
 
+	// A continuation run (--continue / --only --on-run) is some of the spec's
+	// tasks on top of an ended run's passed work; a resume of one filters
+	// the spec the same way, from its subset.json.
+	var sub *subset
+	var onBase string
+	if opt.OnRun != "" {
+		st, err := loadOnRun(ctx, store, opt.Project, opt.OnRun)
+		if err != nil {
+			return Outcome{}, err
+		}
+		only := opt.Only
+		if opt.Continue != "" {
+			if only = st.notPassed; len(only) == 0 {
+				return Outcome{}, fmt.Errorf("--continue %s: every task passed; nothing to continue", opt.OnRun)
+			}
+		}
+		if sp, err = filterSpec(sp, only, opt.OnRun, st.passed); err != nil {
+			return Outcome{}, err
+		}
+		sub, onBase = &subset{OnRun: opt.OnRun, Only: only}, st.base
+		fmt.Fprintf(opt.Stderr, "gosplan run: continuing run %s: tasks %s on %s\n", opt.OnRun, strings.Join(only, " "), short(onBase))
+	} else if opt.RunID != "" {
+		s, ok, err := readSubset(filepath.Join(opt.StateDir, "runs", opt.RunID))
+		if err != nil {
+			return Outcome{}, err
+		}
+		if ok {
+			st, err := loadOnRun(ctx, store, opt.Project, s.OnRun)
+			if err != nil {
+				return Outcome{}, err
+			}
+			if sp, err = filterSpec(sp, s.Only, s.OnRun, st.passed); err != nil {
+				return Outcome{}, err
+			}
+		}
+	}
+
+	// The budget config is read once, here, before anything is written:
+	// an invalid one stops the run before any task runs.
+	if opt.budget, err = resolveBudget(opt, sp); err != nil {
+		return Outcome{}, err
+	}
+	opt.spec = sp
+	var base string
+	if opt.RunID == "" {
+		if onBase != "" {
+			base = onBase
+		} else if base, err = (wt.Git{}).ResolveCommit(ctx, opt.Project, opt.BaseRef); err != nil {
+			return Outcome{}, err
+		}
+	}
+
 	run := opt.RunID
 	if run == "" {
+		if err := prepareEnv(ctx, &opt, base); err != nil {
+			return Outcome{}, err
+		}
 		run = newRunID(store.Now())
 		if err := store.ImportRun(ctx, run, opt.Project, base, sp); err != nil {
 			return Outcome{}, err
 		}
 		if err := store.ImportBudgetTasks(ctx, run, sp); err != nil {
 			return Outcome{}, err
+		}
+		if sub != nil {
+			d := filepath.Join(opt.StateDir, "runs", run)
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				return Outcome{}, err
+			}
+			if err := writeSubset(d, *sub); err != nil {
+				return Outcome{}, err
+			}
 		}
 	} else {
 		got, err := store.SpecSHA(ctx, run)
@@ -397,7 +479,14 @@ func Run(ctx context.Context, opt Options) (Outcome, error) {
 				return Outcome{}, err
 			}
 			defer unlock()
+			if rr.Status == core.RunHalted {
+				fmt.Fprintf(opt.Stderr, "gosplan run: run %s halted; to run its unfinished tasks on its passed work: gosplan run --spec %s --project %s --continue %s\n",
+					run, opt.SpecDir, opt.Project, run)
+			}
 			return reportEnded(ctx, opt, store, rr, notes)
+		}
+		if err := prepareEnv(ctx, &opt, rr.BaseSHA); err != nil {
+			return Outcome{}, err
 		}
 	}
 	runDir := filepath.Join(opt.StateDir, "runs", run)
@@ -556,11 +645,20 @@ func buildConfig(opt Options, sp *spec.Spec, store *state.Store, run, runDir str
 		StallTimeout:      opt.StallTimeout,
 		MaxVerifyErrors:   opt.MaxVerifyErrors,
 		StallQuietMax:     opt.StallQuietMax,
-		RetryDelay:        RetryDelay(opt.RetryBase),
-		Store:             store,
-		Launcher:          attemptLauncher{next: driver.Exec{}},
-		Verifier:          verifyexec.Exec{GosplanBin: opt.GosplanBin, Timeout: opt.VerifyTimeout, OutDir: filepath.Join(runDir, "verify")},
-		Workspace:         wt.Git{},
+		MinFreeDisk:       opt.MinFreeDisk,
+		DiskFree: func() (int64, string, error) {
+			// Worktrees and logs live under the state dir; objects in the project.
+			free, at, err := FreeDisk(opt.StateDir)
+			if f2, at2, err2 := FreeDisk(opt.Project); err2 == nil && (err != nil || f2 < free) {
+				free, at, err = f2, at2, nil
+			}
+			return free, at, err
+		},
+		RetryDelay: RetryDelay(opt.RetryBase),
+		Store:      store,
+		Launcher:   attemptLauncher{next: driver.Exec{}},
+		Verifier:   verifyexec.Exec{GosplanBin: opt.GosplanBin, Timeout: opt.VerifyTimeout, OutDir: filepath.Join(runDir, "verify")},
+		Workspace:  wt.Git{},
 		// Before every launch: back to the recomputed base, so a retry starts
 		// fresh with only the failure summary in its prompt.
 		ResetWorktree: wt.Git{}.Reset,

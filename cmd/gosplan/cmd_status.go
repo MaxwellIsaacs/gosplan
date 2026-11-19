@@ -82,5 +82,14 @@ func cmdStatus(args []string) int {
 		return exitPass
 	}
 	fmt.Print(report.Text(r, now))
+	lastFailure := map[string]string{}
+	if rows, err := s.ListTasks(ctx, run); err == nil {
+		for _, t := range rows {
+			lastFailure[t.ID] = t.LastFailure
+		}
+	}
+	if why := report.Why(r, filepath.Join(dir, "runs", run), lastFailure); why != "" {
+		fmt.Print("\nwhy:\n" + why)
+	}
 	return exitPass
 }

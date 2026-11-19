@@ -16,6 +16,30 @@ import (
 	"github.com/MaxwellIsaacs/gosplan/internal/runner"
 )
 
+// sizeFlag is a byte count written as 3G, 500M, 1024K or plain bytes.
+type sizeFlag int64
+
+func (z *sizeFlag) String() string { return strconv.FormatInt(int64(*z), 10) }
+func (z *sizeFlag) Set(s string) error {
+	mult := int64(1)
+	switch t := strings.ToUpper(strings.TrimSuffix(strings.ToUpper(s), "B")); {
+	case strings.HasSuffix(t, "G"):
+		mult, s = 1<<30, strings.TrimSuffix(t, "G")
+	case strings.HasSuffix(t, "M"):
+		mult, s = 1<<20, strings.TrimSuffix(t, "M")
+	case strings.HasSuffix(t, "K"):
+		mult, s = 1<<10, strings.TrimSuffix(t, "K")
+	default:
+		s = t
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	if err != nil || f < 0 {
+		return fmt.Errorf("want a size like 3G or 500M")
+	}
+	*z = sizeFlag(f * float64(mult))
+	return nil
+}
+
 // onOff is a boolean flag that also accepts on/off (--usage-probe=off).
 type onOff bool
 
@@ -64,11 +88,33 @@ func cmdRun(args []string) int {
 	fs.StringVar(&o.Gremlins, "gremlins", d.Gremlins, "gremlins binary")
 	probe := onOff(true)
 	fs.Var(&probe, "usage-probe", "run the $0 `claude -p /usage` probe when windows are stale (true|false)")
-	dry := fs.Bool("dry-run", false, "validate the spec, print tasks and ready order; touch nothing")
+	dry := fs.Bool("dry-run", false, "validate the spec, print tasks and ready order; touch nothing (with --project: also run the preflight)")
+	fs.BoolVar(&o.SkipPreflight, "skip-preflight", false, "skip the launch checks (claude flags, gate commands on PATH, free disk)")
+	minFree := sizeFlag(runner.DefaultMinFreeDisk)
+	fs.Var(&minFree, "min-free-disk", "halt disk_low below this much free space (e.g. 3G, 500M); preflight refuses under it, warns under twice it")
+	fs.StringVar(&o.Continue, "continue", "", "new run of every task that did not pass in this ended run, on its passed work")
+	fs.StringVar(&o.OnRun, "on-run", "", "new run on this ended run's passed work (with --only)")
+	only := fs.String("only", "", "comma-separated task ids to run (with --on-run)")
 	budgetFlags(fs, &o)
 	if err := fs.Parse(args); err != nil {
 		return exitError
 	}
+	o.MinFreeDisk = int64(minFree)
+	if *only != "" {
+		for _, id := range strings.Split(*only, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				o.Only = append(o.Only, id)
+			}
+		}
+	}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "claude":
+			o.ClaudeExplicit = true
+		case "gosplan-bin":
+			o.GosplanBinExplicit = true
+		}
+	})
 	if fs.NArg() > 0 {
 		fmt.Fprintf(os.Stderr, "gosplan run: unexpected arguments %v\n", fs.Args())
 		return exitError
@@ -81,6 +127,13 @@ func cmdRun(args []string) int {
 		if err := runner.DryRun(o.SpecDir, os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "gosplan run:", err)
 			return exitError
+		}
+		if o.Project != "" && !o.SkipPreflight {
+			o.Stderr = os.Stderr
+			if err := runner.DryRunPreflight(context.Background(), o, os.Stdout); err != nil {
+				fmt.Fprintln(os.Stderr, "gosplan run:", err)
+				return exitError
+			}
 		}
 		return exitPass
 	}

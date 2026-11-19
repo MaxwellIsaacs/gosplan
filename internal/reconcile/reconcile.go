@@ -42,22 +42,27 @@ import (
 // documented on each field.
 type Config struct {
 	Run               string
-	Project           string                    // absolute
-	WorktreeRoot      string                    // <state>/worktrees
-	RunDir            string                    // <state>/runs/<run>
-	IntegrationBranch string                    // default gosplan/<run>/integration
-	Resume            bool                      // the run existed before this process: treat the DB as untrusted
-	Spec              *spec.Spec                // the loaded spec; required with Resume (the static task columns are checked against it)
-	MaxParallel       int                       // required (runner.Defaults has gosplan run's)
-	MaxAttempts       int                       // required
-	StallTimeout      time.Duration             // required
-	LeaseCheck        time.Duration             // default 15s
-	VerifyRetryDelay  time.Duration             // default 30s
-	LockTimeout       time.Duration             // default 1m: gosplan.db busy this long halts state_locked
-	ProgressTimeout   time.Duration             // default 2m: a task stuck this long halts no_progress
-	MaxInfraFailures  int                       // default 10: this many in a row (no launch between) halt infrastructure
-	WriteFailTimeout  time.Duration             // default 1m: a step whose write keeps failing (not busy) this long halts state_write_failed
-	MaxWriteFailures  int                       // default 10: this many consecutive failed writes of one step halt state_write_failed
+	Project           string        // absolute
+	WorktreeRoot      string        // <state>/worktrees
+	RunDir            string        // <state>/runs/<run>
+	IntegrationBranch string        // default gosplan/<run>/integration
+	Resume            bool          // the run existed before this process: treat the DB as untrusted
+	Spec              *spec.Spec    // the loaded spec; required with Resume (the static task columns are checked against it)
+	MaxParallel       int           // required (runner.Defaults has gosplan run's)
+	MaxAttempts       int           // required
+	StallTimeout      time.Duration // required
+	LeaseCheck        time.Duration // default 15s
+	VerifyRetryDelay  time.Duration // default 30s
+	LockTimeout       time.Duration // default 1m: gosplan.db busy this long halts state_locked
+	ProgressTimeout   time.Duration // default 2m: a task stuck this long halts no_progress
+	MaxInfraFailures  int           // default 10: this many in a row (no launch between) halt infrastructure
+	WriteFailTimeout  time.Duration // default 1m: a step whose write keeps failing (not busy) this long halts state_write_failed
+	MaxWriteFailures  int           // default 10: this many consecutive failed writes of one step halt state_write_failed
+	// DiskFree reports the free bytes (and where) on the filesystem holding
+	// the state dir and worktrees; nil turns the disk floor off. Below
+	// MinFreeDisk the run halts disk_low before state writes start failing.
+	DiskFree          func() (int64, string, error)
+	MinFreeDisk       int64
 	UsageResetSlack   time.Duration             // default 2m: added to a usage limit's reset before the run dispatches again
 	UsageLimitBackoff time.Duration             // default 5m: the wait after a usage limit whose stream names no future reset
 	RetryDelay        func(n int) time.Duration // required: runner.RetryDelay(base)
@@ -1123,6 +1128,10 @@ func (r *Reconciler) handleExit(ctx context.Context, snap *memState, t state.Tas
 	// A usage-limit refusal is the plan's window, not the worker: the attempt
 	// is given back and the task waits for the reset (usageLimitPark).
 	usageLimited := found && res.UsageLimited() && code != 0
+	envWhy := ""
+	if !found && code != 0 && !exit.Stalled && !stallKill && !exit.Killed {
+		envWhy = envWorkerFailure(code, strings.TrimSuffix(lt.streamPath, ".stream.jsonl")+".stderr")
+	}
 	var usageUntil time.Time
 	if usageLimited {
 		usageUntil = r.cfg.Now().Add(r.cfg.UsageLimitBackoff)
@@ -1176,6 +1185,8 @@ func (r *Reconciler) handleExit(ctx context.Context, snap *memState, t state.Tas
 		switch {
 		case usageLimited:
 			return r.usageLimitPark(x, t.ID, usageUntil, firstLine(res.Result))
+		case envWhy != "":
+			return r.envPark(x, t.ID, core.StatusRunning, envWhy)
 		case blocked:
 			reason := truncate("GOSPLAN_BLOCKED: " + blockedReason)
 			if err := x.transition(t.ID, core.StatusRunning, core.StatusBlocked, reason); err != nil {
@@ -1206,6 +1217,10 @@ func (r *Reconciler) handleExit(ctx context.Context, snap *memState, t state.Tas
 	r.mu.Lock()
 	delete(r.live, t.ID)
 	r.mu.Unlock()
+	if envWhy != "" {
+		r.halt(ctx, ReasonEnvironment+": task "+t.ID+": "+envWhy)
+		return Result{}, errHalted
+	}
 	if toVerify {
 		r.queue.Add(taskKey(t.ID)) // start the verify at once
 	} else {
@@ -1489,6 +1504,10 @@ func (r *Reconciler) reconcileVerifying(ctx context.Context, snap *memState, t s
 		detail = fmt.Sprintf("verifier exit %d, result %q", out.Exit, out.Result)
 	}
 	retryVerify := false
+	envWhy := ""
+	if kind == verdictFail {
+		envWhy = envGateFailure(out.VerdictJSON)
+	}
 	verrs, prevVerrs := 0, 0
 	err := r.apply(ctx, func(x *txn) error {
 		rec := state.VerdictRecord{VerdictJSON: out.VerdictJSON, FailedGates: out.FailedGates, HeadSHA: vt.req.Head}
@@ -1523,6 +1542,9 @@ func (r *Reconciler) reconcileVerifying(ctx context.Context, snap *memState, t s
 			}
 			return x.update(t.ID, state.TaskUpdate{VerifyErrors: &zero})
 		case verdictFail:
+			if envWhy != "" {
+				return r.envPark(x, t.ID, core.StatusVerifying, envWhy)
+			}
 			failure := fmt.Sprintf("attempt %d failed verification.\nfailed gates: %s\n%s",
 				vt.ref.Attempt, strings.Join(out.FailedGates, ", "), detail)
 			return r.retryPath(x, t.ID, core.StatusVerifying, failure)
@@ -1571,6 +1593,10 @@ func (r *Reconciler) reconcileVerifying(ctx context.Context, snap *memState, t s
 	r.mu.Unlock()
 	if r.cfg.OnVerdict != nil {
 		r.cfg.OnVerdict(ctx, vt.ref, vt.req, out)
+	}
+	if envWhy != "" {
+		r.halt(ctx, ReasonEnvironment+": task "+t.ID+": "+envWhy)
+		return Result{}, errHalted
 	}
 	if verrs >= r.cfg.MaxVerifyErrors {
 		// Nothing is trustworthy when the verifier cannot run.
@@ -1672,6 +1698,10 @@ func (r *Reconciler) reconcileRun(ctx context.Context) (Result, error) {
 	r.cfg.bst.mu.Unlock()
 	snap := r.snapshot()
 	if reason := r.liveness(snap); reason != "" {
+		r.halt(ctx, reason)
+		return Result{}, nil
+	}
+	if reason := r.diskLow(); reason != "" {
 		r.halt(ctx, reason)
 		return Result{}, nil
 	}
